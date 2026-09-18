@@ -181,6 +181,23 @@ A second, narrower core change is also owed and is not covered here:
 `reasoning_content` conditionally on non-empty reasoning, which is a live bug on
 its own (see discussion #739).
 
+## Development
+
+```sh
+npm install && npm test    # `pretest` builds lib/ first
+```
+
+The repository tracks no build output (`lib/` is gitignored); `npm test` compiles
+it, and so does `npm publish` through `prepublishOnly`. Test layout:
+
+- `test/sanitize.spec.mjs` — the pure filter: vocabulary, scope, nesting, identity.
+- `test/cordis.spec.mjs` — a real `@deepseek-ai/cordis` context and a real
+  `llm/stream` waterfall: one dispatch per proposed request, no mutation of a
+  frozen request, no copy on the healthy path.
+- `test/deepseek.spec.mjs` — end to end with a real `@deepseek-ai/dsh-llm-deepseek`
+  adapter and a stubbed global `fetch`: the stored notice dies with zero HTTP
+  calls, and reaches the wire sanitized once the plugin is mounted.
+
 ## License
 
 MIT
