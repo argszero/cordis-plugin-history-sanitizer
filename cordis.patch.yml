@@ -1,0 +1,25 @@
+# The @argszero/cordis-plugin-history-sanitizer bundle patch.
+#
+# It needs no deployment-specific config to mount. With no config it removes
+# `reasoning` and `tool-call` blocks from user content (nested tool results
+# included) -- the two block types that are assistant vocabulary, cannot be user
+# content in the first place, and make the DeepSeek Messages serializer refuse
+# the whole request. Attachments (`image`, `file`) are left alone: they are
+# legitimate user content, so discarding them is the operator's call, via
+# `keepTypes` below. A request that needs no filtering is dispatched untouched.
+#
+# Tune via a profile layer if desired:
+#
+#   - set:
+#       - id: history-sanitizer
+#         config:
+#           stripTypes: [reasoning, tool-call]   # denylist mode (default)
+#           # keepTypes: [text, image, file, tool-result]  # allowlist mode: remove anything else
+#           roles: [user]                        # `user` covers tool results; do NOT add `assistant`
+#           emptyPlaceholder: '(content removed by history-sanitizer)'
+#           warnLimit: 5                         # bounded diagnostics; 0 silences them
+#           observeOnly: false                   # true = report what would be removed, change nothing
+
+- insert:
+    - id: history-sanitizer
+      name: '@argszero/cordis-plugin-history-sanitizer'
