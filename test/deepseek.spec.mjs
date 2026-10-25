@@ -18,7 +18,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { createUserMessage } from '@deepseek-ai/dsh-llm'
-import * as deepseek from '@deepseek-ai/dsh-llm-deepseek'
+// Optional: a line measured without the adapter installed still runs every
+// claim that does not need it, and skips the rest with a reason instead of
+// failing to load.
+const deepseek = await import('@deepseek-ai/dsh-llm-deepseek').catch(() => ({}))
 import * as plugin from '../lib/index.js'
 
 process.env.DEEPSEEK_API_KEY = 'discussion-7065-fixture'
@@ -82,6 +85,29 @@ async function drive(ctx, messages) {
 }
 
 /**
+ * Is the installed adapter a mountable cordis plugin?
+ *
+ * On the 0.1.x lines it is: `name`, `inject` and `apply` are exported and a
+ * profile mounts the package itself. From `0.2.1-rc.1` on it is a library — the
+ * exports are `DeepSeekAdapter`, `registerDeepSeekProvider` and config helpers,
+ * with no plugin surface at all — and the route is mounted by a route plugin
+ * (`dsh-llm-deepseek-api-key`, `-account`) that calls `registerDeepSeekProvider`
+ * with its own credential and discovery callbacks. This file mounts the package
+ * the way its own line expects; where that surface is gone the claims below
+ * cannot be driven, and they say so rather than crash on a missing `apply`.
+ */
+const ADAPTER_INSTALLED = typeof deepseek.apply === 'function' || typeof deepseek.DeepSeekAdapter === 'function'
+
+const ADAPTER_IS_PLUGIN = typeof deepseek.apply === 'function' && typeof deepseek.name === 'string'
+
+/** Skip note for every claim here when the adapter has no plugin surface. */
+const NOT_MOUNTABLE = ADAPTER_IS_PLUGIN
+  ? false
+  : !ADAPTER_INSTALLED
+    ? 'the DeepSeek adapter is not installed in this measurement tree'
+    : 'from 0.2.1-rc.1 on this package is a library, not a plugin: the route is mounted by a route plugin via registerDeepSeekProvider(...), so this file cannot mount the shipped adapter the way these claims require'
+
+/**
  * Does the adapter installed at this dsh line actually speak the Messages
  * protocol? The `protocol` config field and the Messages implementation landed
  * in 0.1.6-alpha.1; before it the DeepSeek adapter always spoke
@@ -89,16 +115,18 @@ async function drive(ctx, messages) {
  * Detected at runtime (the older config schema ignores the unknown key) rather
  * than assumed from a version number.
  */
-const HAS_MESSAGES = await (async () => {
+const HAS_MESSAGES = ADAPTER_IS_PLUGIN ? await (async () => {
   const { ctx, requests } = await mount({ protocol: 'messages', withPlugin: false })
   await drive(ctx, [healthy()])
   return requests[0]?.url.endsWith('/messages') === true
-})()
+})() : false
 
 /** Skip note for the three claims that require the Messages protocol. */
-const MESSAGES_ONLY = HAS_MESSAGES
-  ? false
-  : 'this dsh line predates the Messages protocol, so its DeepSeek adapter cannot fail this way'
+const MESSAGES_ONLY = !ADAPTER_IS_PLUGIN
+  ? NOT_MOUNTABLE
+  : HAS_MESSAGES
+    ? false
+    : 'this dsh line predates the Messages protocol, so its DeepSeek adapter cannot fail this way'
 
 test('#7065 (a): on Messages, one stored reasoning block fails the whole request before any HTTP call', { skip: MESSAGES_ONLY }, async () => {
   const { ctx, requests } = await mount({ protocol: 'messages', withPlugin: false })
@@ -107,7 +135,7 @@ test('#7065 (a): on Messages, one stored reasoning block fails the whole request
   assert.equal(requests.length, 0, 'the serializer threw before the transport was reached')
 })
 
-test('#7065 (b): the sibling chat-completions serializer accepts the same log, silently dropping the block', async () => {
+test('#7065 (b): the sibling chat-completions serializer accepts the same log, silently dropping the block', { skip: NOT_MOUNTABLE }, async () => {
   const { ctx, requests } = await mount({ protocol: 'chat-completions', withPlugin: false })
   const code = await drive(ctx, [storedNotice()])
   assert.notEqual(code, 'UNSUPPORTED_CONTENT', 'no unsupported-content failure on this protocol')

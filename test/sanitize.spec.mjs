@@ -132,3 +132,45 @@ test('shallow nesting is still reached, so the bound only trims the pathological
   assert.ok(outcome)
   assert.deepEqual(outcome.removed, { reasoning: 1 })
 })
+
+test('tool results are in the default scope, as a container and as a tool message', () => {
+  // The same poison, in the two shapes the same repository produces: a durable
+  // user message holding a `tool-result` container (0.1.x lines), and a
+  // first-class `role: 'tool'` message (0.2.1-rc.1 and on). A scope naming only
+  // `user` reaches the first and silently misses the second.
+  const config = resolveConfig()
+  const asContainer = message('user', [toolResult([text('out'), reasoning('inner')])])
+  const asMessage = message('tool', [text('out'), reasoning('inner')], { toolCallId: 'call-1' })
+  const outcome = sanitizeMessages([asContainer, asMessage], config)
+  assert.ok(outcome)
+  assert.deepEqual(outcome.removed, { reasoning: 2 })
+  assert.deepEqual(outcome.messages[0].content[0].content, [text('out')])
+  assert.deepEqual(outcome.messages[1].content, [text('out')])
+})
+
+test('a scope of user alone leaves tool messages alone, which is why the default names both', () => {
+  const narrow = resolveConfig({ roles: ['user'] })
+  const tool = message('tool', [reasoning('inner')], { toolCallId: 'call-1' })
+  assert.equal(sanitizeMessages([tool], narrow), undefined)
+})
+
+test('a container whose tag this plugin has never seen is still traversed', () => {
+  // The block vocabulary is merge-extensible, so the walk reads structure: any
+  // block carrying a nested block array is descended into. A tag list would go
+  // stale exactly where a poison is most likely to hide.
+  const config = resolveConfig()
+  const future = { type: 'future-container', content: [text('kept'), reasoning('gone')] }
+  const outcome = sanitizeMessages([message('user', [future])], config)
+  assert.ok(outcome)
+  assert.deepEqual(outcome.removed, { reasoning: 1 })
+  assert.deepEqual(outcome.messages[0].content[0].content, [text('kept')])
+})
+
+test('allowlist mode still removes a container type it does not list', () => {
+  const config = resolveConfig({ keepTypes: ['text'] })
+  const future = { type: 'future-container', content: [text('inner')] }
+  assert.equal(isRemoved('future-container', config), true)
+  const outcome = sanitizeMessages([message('user', [future])], config)
+  assert.ok(outcome)
+  assert.deepEqual(outcome.removed, { 'future-container': 1 })
+})

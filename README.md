@@ -38,9 +38,11 @@ changed to `messages`, which turned a silent drop into a hard failure.
 Mounted on the public `llm/stream` waterfall, the plugin filters scoped message
 content down to a representable vocabulary **before** the adapter serializes it:
 
-- scoped roles' content (default: `user`, which covers tool results);
-- nested `tool-result` content, filtered the same way (the serializer walks it,
-  so a poison block there fails the request identically);
+- scoped roles' content (default: `user` and `tool` — the two roles a request
+  receives content in: user input, and whatever a tool returned);
+- nested container content, filtered the same way and found **structurally**
+  (any block carrying a nested block array), because the block vocabulary is
+  merge-extensible and the serializer walks whatever is there;
 - only when something is actually removed is the request re-dispatched, as a
   **new** object, through `ctx.llm.stream()`;
 - a healthy request takes the identity path: `next()` receives the original
@@ -68,7 +70,7 @@ All options are optional.
 | --- | --- | --- |
 | `stripTypes` | `['reasoning', 'tool-call']` | block types removed from scoped content; ignored when `keepTypes` is set |
 | `keepTypes` | — | allowlist mode: every scoped block type **not** listed is removed. Use when the failing block type is not known ahead of time (e.g. contributed by another plugin) |
-| `roles` | `['user']` | roles whose content is filtered. `user` covers tool results |
+| `roles` | `['user', 'tool']` | roles whose content is filtered. From `0.2.1-rc.1` on a tool result is its own `role: 'tool'` message, so `user` alone no longer covers it; naming roles explicitly replaces the default |
 | `emptyPlaceholder` | `(content removed by history-sanitizer)` | text substituted when filtering empties a message — an empty content list is itself unrepresentable on some routes |
 | `warnLimit` | `5` | bound on emitted warnings per plugin lifetime; `0` silences logging |
 | `observeOnly` | `false` | report what *would* be removed without rewriting the request |
@@ -120,51 +122,51 @@ per proposed request — the one actually sent.
 ## Peer lines
 
 The runtime surface is the public `llm/stream` waterfall plus the `Message` /
-`ContentBlock` types, which are stable across the prerelease lines. Each
-declared line was installed and run once, from this package's **packed
-tarball** into a fresh tree (a range is a claim; a claim is only as good as the
-last time someone ran the code against it):
+`ContentBlock` types. Each declared line was installed and run separately, with
+the resolved `@deepseek-ai/dsh-llm` version checked first (a range is a claim; a
+claim is only as good as the last time someone ran the code against it):
 
-| declared line | fresh install of the line | suite against that line |
+| declared line | resolved version measured | suite against that line |
 | --- | --- | --- |
-| `0.1.2-rc.1` | ok | 19 passed, 0 failed (3 self-skipped) |
-| `0.1.3-alpha.2` | ok | 19 passed, 0 failed (3 self-skipped) |
-| `0.1.5-rc.2` | ok | 19 passed, 0 failed (3 self-skipped) |
-| `0.1.6-alpha.2` | ok | 22 passed, 0 failed |
-| `0.1.5-alpha.1`, `0.1.5-alpha.2`, `0.1.5-rc.1`, `0.1.6-alpha.1` | **refused by npm** | not reached |
+| `0.1.2-rc.1` | `0.1.2-rc.1` | build clean, 29 passed, 0 failed, 4 self-skipped |
+| `0.1.3-alpha.2` | `0.1.3-alpha.2` | build clean, 29 passed, 0 failed, 4 self-skipped |
+| `0.1.5-alpha.1` | `0.1.5-alpha.1` | build clean, 29 passed, 0 failed, 4 self-skipped |
+| `0.1.6-alpha.1` | `0.1.6-alpha.1` | build clean, 29 passed, 0 failed, 4 self-skipped |
+| `0.1.6-alpha.2` (adapter installed) | `0.1.6-alpha.2` | build clean, **33 passed, 0 failed, 0 skipped** |
+| `0.2.1-rc.1` | `0.2.1-rc.1` | build clean, 29 passed, 0 failed, 4 self-skipped |
+| `0.2.1-rc.2` | `0.2.1-rc.2` | build clean, 29 passed, 0 failed, 4 self-skipped |
+| `0.2.1-rc.3` | `0.2.1-rc.3` | build clean, 29 passed, 0 failed, 4 self-skipped |
 
-The four "refused" lines are **not** a statement about this plugin: a bare
-install of the line's own packages, with no plugin in the tree at all,
-reproduces the identical `ERESOLVE`:
+The four skipped tests are the end-to-end half in `test/deepseek.spec.mjs`. They
+need a `dsh-llm-deepseek` adapter they can **mount**, and the adapter changed
+shape on the way to `0.2.1`:
 
-```
-Could not resolve dependency:
-peer @deepseek-ai/dsh-llm@"^0.1.6-alpha.1" from @deepseek-ai/dsh-llm-deepseek@0.1.6-alpha.1
-  node_modules/@deepseek-ai/dsh-llm-deepseek
-Could not resolve dependency:
-peer @deepseek-ai/dsh-llm@"^0.1.6-alpha.2" from @deepseek-ai/dsh-fs@0.1.6-alpha.2
-  peer @deepseek-ai/dsh-fs@"^0.1.6-alpha.1" from @deepseek-ai/dsh-llm-deepseek@0.1.6-alpha.1
-```
+- on the `0.1.x` lines the package is itself a cordis plugin (`name`, `inject`,
+  `apply`), and a measurement tree that installs it runs all 33 tests — that is
+  the `0.1.6-alpha.2` row above;
+- from `0.2.1-rc.1` on it is a **library**: the exports are `DeepSeekAdapter`,
+  `registerDeepSeekProvider` and config helpers, with no plugin surface at all,
+  and the route is mounted by a route plugin (`dsh-llm-deepseek-api-key`,
+  `-account`) that supplies its own credential and discovery callbacks. This
+  spec mounts the package the way its own line expects, so on those lines it
+  skips with that reason instead of crashing on a missing `apply`.
 
-`dsh-llm-deepseek@X` peer-requires `dsh-fs@^X`; a `^` range whose comparator
-carries a prerelease admits the *next prerelease of the same tuple*, so npm
-resolves `dsh-fs` one line ahead — and that `dsh-fs` peer-requires the next
-line's `dsh-llm`. Every pinned non-latest prerelease line is therefore
-un-installable in a fresh tree, for everyone, whatever they are installing.
-These lines are still declared, because the range describes the plugin's
-**runtime surface**, and that surface is identical on them.
+The three claims that `0.1.6-alpha.1`+ is needed for (`UNSUPPORTED_CONTENT`
+exists only where the Messages protocol does) still self-skip by detecting at
+runtime whether the mounted adapter speaks Messages, rather than asserting a
+failure that cannot occur on an older line.
 
-Three of the four claims in `test/deepseek.spec.mjs` (the end-to-end half that
-drives a real `dsh-llm-deepseek` adapter against a stubbed global `fetch`)
-assert on `UNSUPPORTED_CONTENT`, which only exists on lines that ship the
-Messages protocol (`0.1.6-alpha.1`+). Those three detect at runtime whether the
-installed adapter speaks Messages and self-skip on older lines rather than
-asserting a failure that cannot occur there.
+The plugin's own surface is measured on every line without the adapter: the
+`llm/stream` seam, the filter, the identity path and the packaging receipts all
+run against a stub provider, which is the same shape a real mount uses.
 
-The range string is deliberately written as an explicit set of prerelease
-tuples: a plain `^0.1.2-rc.1` does **not** admit `0.1.3-alpha.2` or
-`0.1.6-alpha.2` under semver prerelease rules, so a caret range would silently
-reject the very lines this plugin is tested on.
+### Why the range is written as explicit tuples
+
+A plain `^0.1.2-rc.1` does **not** admit `0.1.3-alpha.2` or `0.1.6-alpha.2`
+under semver prerelease rules, so a caret range would silently reject the very
+lines this plugin is tested on. Every line is therefore an explicit tuple, and
+the `0.2.1-rc.N` tuple is closed at `<0.2.1` because the prerelease series is
+what was measured.
 
 ## The core fix this plugin does not replace
 
@@ -187,8 +189,11 @@ its own (see discussion #739).
 npm install && npm test    # `pretest` builds lib/ first
 ```
 
-The repository tracks no build output (`lib/` is gitignored); `npm test` compiles
-it, and so does `npm publish` through `prepublishOnly`. Test layout:
+`lib/` **is** tracked: a consumer installs this package from the repository, and
+a git install carries tracked files only, so a gitignored `lib/` would ship a
+package whose `main` does not exist. `npm test` rebuilds it, `prepublishOnly`
+rebuilds it for the tarball, and `test/packaging.spec.mjs` fails if either ignore
+file ever hides it again. Test layout:
 
 - `test/sanitize.spec.mjs` — the pure filter: vocabulary, scope, nesting, identity.
 - `test/cordis.spec.mjs` — a real `@deepseek-ai/cordis` context and a real
@@ -197,6 +202,9 @@ it, and so does `npm publish` through `prepublishOnly`. Test layout:
 - `test/deepseek.spec.mjs` — end to end with a real `@deepseek-ai/dsh-llm-deepseek`
   adapter and a stubbed global `fetch`: the stored notice dies with zero HTTP
   calls, and reaches the wire sanitized once the plugin is mounted.
+- `test/packaging.spec.mjs` — what the *published* artifact needs: every bare
+  import declared at runtime, no stale declaration, the mount patch shipped, and
+  the entry point present on both channels (git and tarball).
 
 ## License
 

@@ -1,7 +1,7 @@
 {
   "name": "@argszero/cordis-plugin-history-sanitizer",
   "description": "Request-level history sanitizer for dsh: a session whose durable log holds content the target wire protocol cannot represent is permanently unusable, because the offending block sits in the log and no UI can edit it. Mounted on the public llm/stream waterfall, this plugin filters scoped message content (user role and nested tool results by default) down to a representable vocabulary and re-dispatches the request as a new object only when something was actually removed. Source: discussion #7065 (DeepSeek Messages cannot represent user/tool-result content reasoning). Compatible with the dsh 0.1.2, 0.1.3, 0.1.5 and 0.1.6 prerelease lines.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -47,15 +47,15 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1 <0.2.0 || >=0.1.3-alpha.2 <0.2.0 || >=0.1.5-alpha.1 <0.2.0 || >=0.1.6-alpha.1 <0.2.0"
+    "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1 <0.2.0 || >=0.1.3-alpha.2 <0.2.0 || >=0.1.5-alpha.1 <0.2.0 || >=0.1.6-alpha.1 <0.2.0 || >=0.2.1-rc.1 <0.2.1"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-llm": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-llm-deepseek": "0.1.6-alpha.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-llm-deepseek": "0.2.1-rc.3",
     "@types/node": "^22.10.2",
     "semver": "^7.6.3",
     "typescript": "^5.5.0"

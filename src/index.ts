@@ -23,10 +23,12 @@
  * It sanitizes the request *between* the harness and its adapter, on the public
  * `llm/stream` waterfall:
  *
- * - scoped roles' content (default: `user`, which carries tool results too) is
- *   filtered down to a vocabulary the route can represent;
- * - nested `tool-result` content is filtered the same way (the serializer walks
- *   it, so a poison block there fails the request identically);
+ * - scoped roles' content (default: `user` and `tool` — the two roles a request
+ *   receives content in) is filtered down to a vocabulary the route can
+ *   represent;
+ * - nested container content is filtered the same way, whatever the container's
+ *   tag: the serializer walks it, so a poison block there fails the request
+ *   identically, and the block vocabulary is merge-extensible;
  * - only when something is actually removed is the request re-dispatched, as a
  *   **new** object, through `ctx.llm.stream()` — never by mutating the request
  *   the loop assembled, which arrives deep-frozen and is the durable log's
@@ -65,14 +67,55 @@ import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ContentBlock, GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
 
-/** Message roles this plugin can scope to. */
-export type ScopedRole = 'user' | 'assistant' | 'system'
+/**
+ * Message roles this plugin can scope to.
+ *
+ * `user` and `tool` are the two roles a request receives *content* in — user
+ * input, and whatever a tool returned — so they are the default scope. From
+ * `0.2.1-rc.1` on a tool result is its own `role: 'tool'` message; before that
+ * it arrived as a `tool-result` container inside a user message. Both shapes are
+ * named here, because a scope that only knows one of them stops rescuing the
+ * sessions most poisons arrive in while still reporting success.
+ */
+export type ScopedRole = 'user' | 'assistant' | 'system' | 'tool'
 
-/** Block types that are containers, never removed, and always traversed. */
+/**
+ * The part of a message this filter reads: its scope role and its blocks.
+ *
+ * Structural on purpose. `GenerateOptions.messages` is `Message[]` on the 0.1.x
+ * lines and `RequestMessage[]` (`Message | RequestUserInput`) from `0.2.1-rc.1`
+ * on, and this filter must compile and behave on both without naming a type
+ * that only one of them has.
+ */
+export interface WalkableMessage {
+  readonly role: string
+  readonly content: readonly ContentBlock[]
+}
+
+/**
+ * Block types this plugin knows to be containers, which are never removed.
+ *
+ * The walk does **not** consult this list: it descends into any block carrying a
+ * nested block array, because the block vocabulary is merge-extensible and a
+ * walk that names tags is how it goes stale. The list governs one decision —
+ * allowlist mode must not drop a container, or a tool result becomes an empty
+ * message and the request fails on the other side instead.
+ */
 const CONTAINER_TYPES: readonly string[] = ['tool-result']
 
-/** Maximum nesting depth traversed inside `tool-result` content. */
+/** Maximum nesting depth traversed inside container content. */
 const MAX_DEPTH = 8
+
+/**
+ * The nested block list a container block carries, or `undefined` for a leaf.
+ *
+ * Read structurally rather than through a typed member: the union of block types
+ * is open, and only some members declare `content`.
+ */
+function containerContent(block: ContentBlock): readonly ContentBlock[] | undefined {
+  const nested: unknown = (block as { content?: unknown }).content
+  return Array.isArray(nested) ? (nested as readonly ContentBlock[]) : undefined
+}
 
 /** Plugin configuration. */
 export interface Config {
@@ -90,9 +133,12 @@ export interface Config {
    */
   keepTypes?: string[]
   /**
-   * Roles whose content is filtered. Default `['user']`, which also covers tool
-   * results. Do not add `assistant` without reading the module note: assistant
-   * reasoning is representable and is required for chain-of-thought passback.
+   * Roles whose content is filtered. Default `['user', 'tool']` — the two roles
+   * a request receives content in. From `0.2.1-rc.1` on a tool result is its own
+   * `role: 'tool'` message, so a scope of `['user']` alone no longer covers it;
+   * naming `roles` explicitly replaces the default. Do not add `assistant`
+   * without reading the module note: assistant reasoning is representable and is
+   * required for chain-of-thought passback.
    */
   roles?: ScopedRole[]
   /**
@@ -129,7 +175,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   return {
     stripTypes: config.stripTypes ?? ['reasoning', 'tool-call'],
     keepTypes: config.keepTypes,
-    roles: config.roles ?? ['user'],
+    roles: config.roles ?? ['user', 'tool'],
     emptyPlaceholder: config.emptyPlaceholder ?? '(content removed by history-sanitizer)',
     warnLimit: config.warnLimit ?? 5,
     observeOnly: config.observeOnly ?? false,
@@ -139,16 +185,16 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
 export const Config: z<Config> = z.object({
   stripTypes: z.array(z.string()).default(['reasoning', 'tool-call']),
   keepTypes: z.array(z.string()),
-  roles: z.array(z.union(['user', 'assistant', 'system'])).default(['user']),
+  roles: z.array(z.union(['user', 'assistant', 'system', 'tool'])).default(['user', 'tool']),
   emptyPlaceholder: z.string().default('(content removed by history-sanitizer)'),
   warnLimit: z.number().step(1).min(0).default(5),
   observeOnly: z.boolean().default(false),
 })
 
 /** One sanitize pass's account of what it did. */
-export interface SanitizeOutcome {
+export interface SanitizeOutcome<T extends WalkableMessage = Message> {
   /** The rewritten message list; `undefined` when no message needed a rewrite. */
-  readonly messages?: Message[]
+  readonly messages?: T[]
   /** Removed block counts, keyed by block type. */
   readonly removed: Record<string, number>
   /** How many messages were rebuilt. */
@@ -181,13 +227,22 @@ function filterBlocks(
   let changed = false
   const kept: ContentBlock[] = []
   for (const block of blocks) {
-    if (block.type === 'tool-result' && depth < MAX_DEPTH) {
-      const nested = filterBlocks(block.content, config, removed, depth + 1)
-      if (nested === undefined) {
+    const nested = containerContent(block)
+    if (nested !== undefined && depth < MAX_DEPTH) {
+      // The policy still decides whether the container itself survives; the walk
+      // only decides what its content is filtered down to. Allowlist mode must
+      // keep removing a type it does not list, container or not.
+      if (isRemoved(block.type, config)) {
+        removed[block.type] = (removed[block.type] ?? 0) + 1
+        changed = true
+        continue
+      }
+      const filtered = filterBlocks(nested, config, removed, depth + 1)
+      if (filtered === undefined) {
         kept.push(block)
       } else {
         changed = true
-        kept.push({ ...block, content: nested })
+        kept.push({ ...block, content: filtered } as unknown as ContentBlock)
       }
       continue
     }
@@ -214,11 +269,14 @@ function filterBlocks(
  * @param config - resolved configuration.
  * @returns the outcome, or `undefined` when no message needed a rewrite.
  */
-export function sanitizeMessages(messages: readonly Message[], config: ResolvedConfig): SanitizeOutcome | undefined {
+export function sanitizeMessages<T extends WalkableMessage>(
+  messages: readonly T[],
+  config: ResolvedConfig,
+): SanitizeOutcome<T> | undefined {
   const removed: Record<string, number> = {}
   let rewritten = 0
   let touched = false
-  const next: Message[] = messages.map((message) => {
+  const next: T[] = messages.map((message) => {
     if (!config.roles.includes(message.role as ScopedRole)) return message
     const content = filterBlocks(message.content, config, removed, 0)
     if (content === undefined) return message
@@ -227,14 +285,14 @@ export function sanitizeMessages(messages: readonly Message[], config: ResolvedC
     const placeholder: ContentBlock[] = content.length > 0
       ? content
       : [{ type: 'text', text: config.emptyPlaceholder }]
-    return { ...message, content: placeholder }
+    return { ...message, content: placeholder } as T
   })
   if (!touched) return undefined
   return { messages: next, removed, messagesRewritten: rewritten }
 }
 
 /** Render one outcome as a single bounded line. */
-export function describeOutcome(outcome: SanitizeOutcome): string {
+export function describeOutcome<T extends WalkableMessage>(outcome: SanitizeOutcome<T>): string {
   const counts = Object.entries(outcome.removed)
     .sort(([a], [b]) => (a < b ? -1 : 1))
     .map(([type, count]) => `${type}×${count}`)
